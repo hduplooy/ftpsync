@@ -1,7 +1,8 @@
 package ftpsync
 
 import (
-	ftp "github.com/jlaffaye/ftp"
+	"github.com/jlaffaye/ftp"
+	"io/fs"
 	"os"
 	"strings"
 	"time"
@@ -16,12 +17,12 @@ type Config struct {
 	RemotePath string
 }
 
-type Session struct {
+type session struct {
 	Config     *Config
 	Connection *ftp.ServerConn
 }
 
-func Connect(config *Config) (*Session, error) {
+func connect(config *Config) (*session, error) {
 	if config.Port == "" {
 		config.Port = "21"
 	}
@@ -38,27 +39,49 @@ func Connect(config *Config) (*Session, error) {
 	if !strings.HasSuffix(config.LocalPath, string(os.PathSeparator)) {
 		config.LocalPath += string(os.PathSeparator)
 	}
-	if !strings.HasSuffix(config.RemotePath, string(os.PathSeparator)) {
-		config.RemotePath += string(os.PathSeparator)
-	}
 
-	return &Session{config, c}, nil
+	return &session{config, c}, nil
 }
 
-func (session *Session) UploadIfNewer(relpath, src, dest string) error {
-	srcinfo, err := os.Lstat(session.Config.LocalPath + relpath + string(os.PathSeparator) + src)
+func (session *session) close() error {
+	return session.Connection.Quit()
+}
+
+func SyncFolders(config *Config) error {
+	session, err := connect(config)
+	if err != nil {
+		return err
+	}
+	defer session.close()
+
+	con := session.Connection
+	err = con.ChangeDir(config.RemotePath)
 	if err != nil {
 		return err
 	}
 
-	return nil
-}
+	return fs.WalkDir(os.DirFS(session.Config.LocalPath), ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || path == "." {
+			return nil
+		}
+		localInfo, _ := d.Info()
+		remoteInfo, err := con.GetEntry(path)
+		if d.IsDir() {
+			if err != nil {
+				err = con.MakeDir(path)
+			}
+		} else {
+			if err != nil || localInfo.ModTime().Unix() > remoteInfo.Time.Unix() {
+				rdr, err := os.Open(session.Config.LocalPath + path)
 
-func (session *Session) SyncUp() error {
-
-	return nil
-}
-
-func (session *Session) Close() error {
-	return session.Connection.Quit()
+				if err == nil {
+					err = con.Stor(path, rdr)
+				}
+				return err
+			} else {
+				err = nil
+			}
+		}
+		return err
+	})
 }
